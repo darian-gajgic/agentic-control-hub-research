@@ -1,0 +1,41 @@
+# T07 — Durable state, checkpointing & crash recovery
+
+**Wave:** B1 (consumes the G1 addendum: engine + session-model decisions) · **Depth:** FULL · **Report slug:** `durable-state-checkpointing-recovery`
+
+## Scope
+3.8 (runs survive disasters: crash/restart/sleep/limit — finished work recovered, in-progress resumes from checkpoint, re-spend bounded, outward actions never repeated), 4.8/D7 (mechanics), 4.5 (maintenance mode), S1.11 (parallel same-project coordination state), 11.3 (state snapshot mechanics belong to T12; here only what must BE durable).
+
+## Why this gates the spec
+"Restarts never lose paid AI work" was Nexus's most valuable verified property, and under subscription economics wasted tokens are wasted *windows*. The spec's state layer — what is persisted, when, and how recovery classifies interrupted work — must be designed before the schema exists, and it depends directly on G1's engine decision (what session state the engine exposes).
+
+## Core question
+How should a single-host platform persist run state in mid-2026 so that platform crashes, host sleeps, restarts, and provider-limit interruptions never lose paid AI work — what are current best practices for durable, resumable agent execution (checkpoint content, orphan recovery, idempotent effects, atomic queueing), and which existing machinery (durable-execution frameworks vs DIY-on-SQLite) fits a solo-maintained laptop platform?
+
+## Sub-questions
+1. Durable-execution landscape mid-2026 for this scale: Temporal-class engines, lighter-weight durable runtimes (DBOS-class, Inngest-class, others current), plain SQLite state machines — operational cost for ONE maintainer on ONE host vs what each actually buys; do any have first-class agent/LLM-step support now?
+2. What a checkpoint IS when an adopted engine holds the session (per G1): engine-session pointer + platform-side event log? Full transcript capture? Artifact snapshots? Recovery fidelity and re-spend bounds per design — "checkpoint after every paid model call" made concrete for the chosen substrate.
+3. Orphan recovery: on restart, classifying interrupted work as still-running / finished-during-outage (harvest the result!) / dead — the harvest map's N1 ladder is the reference; find public equivalents and current idioms (process supervision, session-history harvesting, lease/heartbeat designs).
+4. Exactly-once outward effects: proposal gating (4.2) + idempotency keys + effect journals — patterns ensuring a crash between "approved" and "executed" never double-sends/pushes/publishes.
+5. Atomic work claiming and queues on SQLite: CAS claiming (N2 reference), WAL-mode concurrency realities, lease expiry, per-model slot gates — versus adopting a small job-queue library; current best practice.
+6. Event-sourcing vs mutable-state-plus-audit for run lifecycle: which do comparable systems use; replay/debugging value vs complexity for bus-factor-1.
+7. Crash-consistency verification culture: kill -9 / power-cut test harnesses for state layers; sleep/wake edge cases on laptops (clock jumps, network changes mid-run).
+8. Maintenance mode (4.5): drain semantics (finish in-flight, accept nothing) and how systems implement stop-the-world safely around in-flight paid calls.
+9. Multi-task same-project coordination state (S1.11): artifact-claim/lock registries at plan time; freshness re-check triggers when a sibling lands (mechanics; policy lives in T02's 4.3 findings).
+
+## Constraints that bind this topic
+D7 (the invariant this topic implements), D3 (checkpointing works through the adapter contract uniformly across substrates), D9 (accepted work exits through git — the state layer holds everything before acceptance), 15.6 (every record owner-attributed from day one).
+
+## Harvest-map items to verdict
+N1 (orphan-harvest ladder + control/execution split), N2 (CAS claiming + slot gates), N4 (dispatch state machine, user-facing status orthogonal to machinery status), A5 (Archon's 7-table schema as minimal-set sanity reference).
+
+## Sources to prioritize
+Durable-execution project docs/comparisons (current, not 2024 hype), SQLite-in-production engineering posts (WAL, litestream-class replication), agent-platform postmortems on lost work, engine docs on session persistence/resume (per G1 choice).
+
+## Decisions this feeds
+G2: state layer design (framework vs DIY, checkpoint content, recovery ladder). Spec: schema core, run lifecycle persistence, recovery procedures (tested, not assumed).
+
+## G1 addendum (gate closed 2026-07-17 — binding input; cite `Research/decisions/GATE-1-architecture-direction.md`, not conversation)
+G1 ratified: **dual substrate** (pinned `opencode serve` per user + wrapped `claude -p` per user; Agent SDK = in-adapter alternative, S1 spike pending) · **session model:** run-lifecycle FSM + platform-owned SQLite-WAL append-only event log; engine transcripts are never durable checkpoints (P-T01-1) · **fresh-context-per-stage** on the Task Context Ledger (= D7 checkpoint payload = 4.3 freshness input) · orchestration is single-agent-first with **all spawning control-plane-owned — engine-native subagents disabled on every substrate** (operator rider) · verification two-axis. Operator-ratified numbers this topic consumes (all operator-editable settings, never constants — operator rider): hold-vs-park 10 min; maintenance drain grace 15 min; freshness fingerprint {repo HEAD, source hashes, spec/plan version, price-table version}, >24 h OR drift OR sibling-accept, price-drift alone triggers; systemd transient units per run process ADOPTED; runaway containment = pause-and-flag. v0 lanes: Anthropic Max + Z.AI GLM Coding Max (operator holds both). **Spike addendum #2 (S2 defer drill, S3 opencode park conformance) follows before launch — read `Research/spikes/` if present.**
+
+## Spike addendum #2 (G1 battery complete 2026-07-17 — measured facts, cite `Research/spikes/G1-S{1,2,3}-*.md`)
+**S1 (CLI vs SDK):** CLI-wrap confirmed for v0; SDK verified near-drop-in fallback (subscription auth, healthy resume-cache on BOTH surfaces — R05 §2.2's "CLI has the healthier caching story" is stale; §4.12 alarm stays). Checkpoint rows can be surface-agnostic (identical per-call usage/result schemas); record session id from `system/init`, never assume it. **S2 (defer drill, v2.1.212):** park/resume contract PASS — exit JSON carries full `deferred_tool_use{id,name,input}` (build the durable ask record from it, no transcript parsing); resume re-fires same `tool_use_id`, `updatedInput` works, same session id (no fork); poll-resume of a parked session is $0. **Engine restores NOTHING on resume** — hooks are per-invocation and permission mode is NOT restored (report 05 §2.3 [S41] corrected by measurement): park record must snapshot the entire invocation config (settings content/fingerprint, permission mode, model) and resume = full reconstruction; forgetting `--settings` silently executed the parked call. **Parallel-tool-call fallback = 20.2% of gated turns on the default model (N=7,325 corpus; opus-4-8 8.5% — model-sensitive, silent in `-p` json mode; detect by hook-fire-count vs exit-reason)** → the fallback path is first-class, sized here; `serialize-by-deny` designed but unprobed (next battery). Same-turn `--max-budget-usd` pre-empts the park even after the hook fired → died-at-gate must be a handled state. `cleanupPeriodDays` default 30, no override on this host → raise on the Claude lane. **S3 (opencode 1.18.3, pin exact `@1.18.3`):** sessions/messages/forks survive restart (SQLite WAL, per-session durable event log + typed cost/token columns); **pending permission AND question asks are in-memory Maps — rejected on graceful shutdown, lost on crash (source-verified)** → P-T02-1 confirmed at source: platform ask records authoritative at observation. Adapter targets `permission.list`/`question.list` + `POST /permission/{requestID}/reply` (newer endpoint; carries reject-with-feedback `CorrectedError` — prefer over legacy `permission.respond`); parse both event generations (`EventPermissionAsked`/`EventPermissionV2Asked`); health `GET /api/health`, status `GET /session/status` (`retry` variant carries provider-limit context), fork `POST /session/{id}/fork`. Live-auth park round-trip still pending (Z.AI key provisioning; blocked-steps in S3 report).
